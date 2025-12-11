@@ -398,14 +398,33 @@ function splitMessages(message: string): string[] {
   return [...conventionalCommits, ...messages.slice(1)];
 }
 
+// Priority order for commit types (higher = more significant for version bump)
+const TYPE_PRIORITY: Record<string, number> = {
+  feat: 3,
+  feature: 3,
+  fix: 2,
+  perf: 2,
+  deps: 1,
+  revert: 1,
+  docs: 0,
+  style: 0,
+  chore: 0,
+  refactor: 0,
+  test: 0,
+  build: 0,
+  ci: 0,
+};
+
 /**
  * Given a list of raw commits, parse and expand into conventional commits.
  *
+ * For squash-merged PRs with multiple conventional commits in the body,
+ * this will consolidate them into a single entry using the PR title,
+ * but with the highest-priority type (for correct version bumping).
+ *
  * @param commits {Commit[]} The input commits
  *
- * @returns {ConventionalCommit[]} Parsed and expanded commits. There may be
- *   more commits returned as a single raw commit may contain multiple release
- *   messages.
+ * @returns {ConventionalCommit[]} Parsed conventional commits.
  */
 export function parseConventionalCommits(
   commits: Commit[],
@@ -414,36 +433,63 @@ export function parseConventionalCommits(
   const conventionalCommits: ConventionalCommit[] = [];
 
   for (const commit of commits) {
-    for (const commitMessage of splitMessages(
-      preprocessCommitMessage(commit)
-    )) {
+    const allMessages = splitMessages(preprocessCommitMessage(commit));
+    const parsedSubCommits: parser.ConventionalChangelogCommit[] = [];
+
+    // Parse all sub-commits to find types and breaking changes
+    for (const commitMessage of allMessages) {
       try {
         for (const parsedCommit of parseCommits(commitMessage)) {
-          const breaking =
-            parsedCommit.notes.filter(note => note.title === 'BREAKING CHANGE')
-              .length > 0;
-          conventionalCommits.push({
-            sha: commit.sha,
-            message: parsedCommit.header,
-            files: commit.files,
-            pullRequest: commit.pullRequest,
-            type: parsedCommit.type,
-            scope: parsedCommit.scope,
-            bareMessage: parsedCommit.subject,
-            notes: parsedCommit.notes,
-            references: parsedCommit.references,
-            breaking,
-          });
+          parsedSubCommits.push(parsedCommit);
         }
       } catch (_err) {
-        logger.debug(
-          `commit could not be parsed: ${commit.sha} ${
-            commit.message.split('\n')[0]
-          }`
-        );
-        logger.debug(`error message: ${_err}`);
+        // Ignore parse errors for sub-commits
       }
     }
+
+    // Get the PR title (first line of commit message)
+    const prTitle = commit.message.split('\n')[0].trim();
+
+    if (parsedSubCommits.length === 0) {
+      logger.debug(
+        `commit could not be parsed: ${commit.sha} ${prTitle}`
+      );
+      continue;
+    }
+
+    // Find the highest priority type and check for breaking changes
+    let highestType = parsedSubCommits[0].type;
+    let highestPriority = TYPE_PRIORITY[highestType.toLowerCase()] ?? 0;
+    let hasBreaking = false;
+    const allNotes: parser.Note[] = [];
+    const allReferences: parser.Reference[] = [];
+
+    for (const parsed of parsedSubCommits) {
+      const priority = TYPE_PRIORITY[parsed.type.toLowerCase()] ?? 0;
+      if (priority > highestPriority) {
+        highestPriority = priority;
+        highestType = parsed.type;
+      }
+      if (parsed.notes.some(note => note.title === 'BREAKING CHANGE')) {
+        hasBreaking = true;
+      }
+      allNotes.push(...parsed.notes);
+      allReferences.push(...parsed.references);
+    }
+
+    // Use the PR title as the message, but with the highest type from sub-commits
+    conventionalCommits.push({
+      sha: commit.sha,
+      message: `${highestType}: ${prTitle}`,
+      files: commit.files,
+      pullRequest: commit.pullRequest,
+      type: highestType,
+      scope: null,
+      bareMessage: prTitle,
+      notes: allNotes,
+      references: allReferences,
+      breaking: hasBreaking,
+    });
   }
 
   return conventionalCommits;
