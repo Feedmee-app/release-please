@@ -387,7 +387,10 @@ function splitMessages(message: string): string[] {
     messages[0] = messages[0] + rest.join('END_NESTED_COMMIT');
   }
 
-  const conventionalCommits = messages[0]
+  // Strip GitHub squash merge bullet prefixes (e.g., "* feat:" -> "feat:")
+  const normalized = messages[0].replace(/\n\n\* /g, '\n\n');
+
+  const conventionalCommits = normalized
     .split(
       /\r?\n\r?\n(?=(?:feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(?:\(.*?\))?: )/
     )
